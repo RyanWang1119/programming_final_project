@@ -1,0 +1,246 @@
+```{r}
+# Load Required Libraries
+library(readr)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(ggplot2)
+library(Metrics)
+```
+
+# Step 1: Read and Prepare the Data
+```{r}
+# Read the imputed data
+imputed_data <- read_csv("data/imputed_data.csv")
+
+# Exclude other years' life_expectancy variables
+prepared_data <- imputed_data %>%
+  select(-starts_with("life_expectancy_"), life_expectancy_2022, country, countryiso3code) %>%
+  select(where(is.numeric)) # Keep only numeric variables
+
+# Split into predictors (X) and target (Y)
+target <- "life_expectancy_2022"
+X <- prepared_data %>% select(-all_of(target))
+Y <- prepared_data[[target]]
+```
+
+# Step 2: Split Data into Train and Test Sets
+```{r}
+set.seed(123)  # For reproducibility
+train_index <- createDataPartition(Y, p = 0.8, list = FALSE)
+
+# Training data
+train_data <- prepared_data[train_index, ]
+X_train <- train_data %>% select(-life_expectancy_2022)
+Y_train <- train_data$life_expectancy_2022
+
+# Testing data
+test_data <- prepared_data[-train_index, ]
+X_test <- test_data %>% select(-life_expectancy_2022)
+Y_test <- test_data$life_expectancy_2022
+```
+
+
+# Step 3: Perform PCA on Training Data
+```{r}
+# Perform PCA on the training set predictors
+preProcess_pca <- preProcess(X_train, method = "pca", thresh = 0.95) # Retain 95% variance
+X_train_pca <- predict(preProcess_pca, X_train)
+
+# Apply PCA transformation to testing data
+X_test_pca <- predict(preProcess_pca, X_test)
+
+# Combine PCA-transformed training predictors with the target variable
+train_pca_data <- cbind(X_train_pca, life_expectancy_2022 = Y_train)
+
+print(preProcess_pca)
+```
+
+## Scree Plot
+```{r}
+# Calculate variance explained
+explained_variance <- apply(X_train_pca, 2, var) / sum(apply(X_train_pca, 2, var)) * 100
+
+# Create a data frame for the scree plot
+scree_data <- data.frame(PC = seq_along(explained_variance), Variance = explained_variance)
+
+# Create the scree plot
+scree_plot <- ggplot(scree_data, aes(x = PC, y = Variance)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "Scree Plot (Explained Variance by PCA Components)",
+    x = "Principal Components",
+    y = "Variance Explained (%)"
+  ) +
+  geom_line(aes(group = 1), color = "red", size = 1) +
+  geom_point(color = "red", size = 2)
+
+# Save and display the scree plot
+print(scree_plot)
+ggsave("plot/pca_scree_plot.png", plot = scree_plot, width = 10, height = 6)
+```
+
+## Scatterplot of First Two Principal Components
+```{r}
+# Convert the PCA-transformed training data into a data frame
+pca_data <- as.data.frame(X_train_pca)
+pca_data$life_expectancy_2022 <- Y_train  # Add the target variable for coloring
+
+# Create scatterplot for the first two principal components
+scatter_plot <- ggplot(pca_data, aes(x = PC1, y = PC2, color = life_expectancy_2022)) +
+  geom_point(alpha = 0.7, size = 3) +
+  scale_color_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  labs(
+    title = "PCA Results: First Two Principal Components",
+    x = "Principal Component 1",
+    y = "Principal Component 2",
+    color = "Life Expectancy (2022)"
+  )
+
+# Save and display the scatter plot
+print(scatter_plot)
+ggsave("plot/pca_scatter_plot.png", plot = scatter_plot, width = 10, height = 6)
+```
+
+# Step 4: Train Models Using Cross-Validation
+```{r}
+# Set up cross-validation
+control <- trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+# Train Linear Regression
+model_lm <- train(life_expectancy_2022 ~ ., data = train_pca_data,
+                  method = "lm", trControl = control)
+
+# Train Random Forest
+model_rf <- train(life_expectancy_2022 ~ ., data = train_pca_data,
+                  method = "rf", trControl = control)
+
+# Train Support Vector Machine (Radial Kernel)
+model_svm <- train(life_expectancy_2022 ~ ., data = train_pca_data,
+                   method = "svmRadial", trControl = control)
+
+# Train Gradient Boosting Machine
+model_gbm <- train(life_expectancy_2022 ~ ., data = train_pca_data,
+                   method = "gbm", trControl = control, verbose = FALSE)
+
+# Summarize cross-validation results for all models
+cv_results <- resamples(list(
+  Linear_Regression = model_lm,
+  Random_Forest = model_rf,
+  SVM = model_svm,
+  Gradient_Boosting = model_gbm
+))
+
+# Display CV performance summary
+print(summary(cv_results))
+
+# Save boxplot comparing cross-validation results
+bwplot(cv_results)
+ggsave("plot/cv_model_comparison.png", width = 10, height = 6)
+```
+
+# Step 5: Evaluate Models on Test Data
+```{r}
+# Prepare test data
+test_pca_data <- cbind(X_test_pca, life_expectancy_2022 = Y_test)
+
+# Helper function to evaluate performance
+evaluate_model <- function(model, X_test, Y_test) {
+  predictions <- predict(model, newdata = X_test)
+  rmse_val <- rmse(Y_test, predictions)
+  r2_val <- cor(Y_test, predictions)^2
+  return(list(predictions = predictions, rmse = rmse_val, r2 = r2_val))
+}
+
+# Evaluate each model
+lm_eval <- evaluate_model(model_lm, X_test_pca, Y_test)
+rf_eval <- evaluate_model(model_rf, X_test_pca, Y_test)
+svm_eval <- evaluate_model(model_svm, X_test_pca, Y_test)
+gbm_eval <- evaluate_model(model_gbm, X_test_pca, Y_test)
+
+# Combine evaluation results into a data frame
+evaluation_results <- data.frame(
+  Model = c("Linear Regression", "Random Forest", "SVM", "Gradient Boosting"),
+  RMSE = c(lm_eval$rmse, rf_eval$rmse, svm_eval$rmse, gbm_eval$rmse),
+  R2 = c(lm_eval$r2, rf_eval$r2, svm_eval$r2, gbm_eval$r2)
+)
+
+# Save and display evaluation results
+write_csv(evaluation_results, "data/evaluation_results.csv")
+print(evaluation_results)
+```
+
+# Step 6: Visualize Model Performance on Test Data
+```{r}
+# Prepare data for visualization
+test_results <- data.frame(
+  Actual = Y_test,
+  Linear_Regression = lm_eval$predictions,
+  Random_Forest = rf_eval$predictions,
+  SVM = svm_eval$predictions,
+  Gradient_Boosting = gbm_eval$predictions
+)
+
+# Create scatterplot comparing predictions and actual values
+scatter_plot <- ggplot(test_results, aes(x = Actual)) +
+  geom_point(aes(y = Linear_Regression, color = "Linear Regression")) +
+  geom_point(aes(y = Random_Forest, color = "Random Forest")) +
+  geom_point(aes(y = SVM, color = "SVM")) +
+  geom_point(aes(y = Gradient_Boosting, color = "Gradient Boosting")) +
+  theme_minimal() +
+  labs(
+    title = "Predictions vs Actual Life Expectancy (2022)",
+    x = "Actual Life Expectancy (2022)",
+    y = "Predicted Life Expectancy (2022)",
+    color = "Model"
+  )
+
+# Save and display the scatter plot
+ggsave("plot/predictions_vs_actual.png", plot = scatter_plot, width = 10, height = 10)
+print(scatter_plot)
+```
+
+```{r}
+
+library(caret)
+library(FactoMineR)
+
+# Extract PCA loadings from preProcess object
+pca_loadings <- preProcess_pca$rotation
+
+# Extract feature importance of PCs from the random forest model
+pc_importance <- varImp(model_rf)$importance$Overall
+
+# Compute original feature importance
+original_importance <- rowSums((pca_loadings^2) %*% diag(pc_importance))
+names(original_importance) <- rownames( )
+
+# Sort and display
+original_importance <- sort(original_importance, decreasing = TRUE)
+
+importance_df <- data.frame(
+  Variable = names(original_importance),
+  Importance = original_importance
+) %>%
+  arrange(desc(Importance)) %>%  # descending order
+  slice(1:20)
+
+
+ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +  
+  labs(
+    title = "Feature Importance (Original Variables)",
+    x = "Original Variables",
+    y = "Importance"
+  ) +
+  theme_minimal() +  
+  theme(
+    axis.text.y = element_text(size = 10),  
+    axis.title = element_text(size = 12),  
+    plot.title = element_text(size = 14, hjust = 0.5) 
+  )
+```
+

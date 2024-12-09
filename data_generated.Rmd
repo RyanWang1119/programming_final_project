@@ -1,0 +1,128 @@
+```{r}
+library(httr)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(parallel)
+
+# Function to fetch paginated data from an API
+fetch_paginated_data <- function(url) {
+  page <- 1
+  all_data <- list()
+  repeat {
+    paged_url <- paste0(url, "&page=", page) # Append page number to the URL
+    response <- GET(paged_url)
+    if (status_code(response) != 200) {
+      warning("Failed to retrieve data from page ", page)
+      break
+    }
+    data <- content(response, "parsed") # Parse the JSON content
+    if (length(data[[2]]) == 0) break   # Exit loop if no records are found
+    all_data <- c(all_data, data[[2]])  # Append current page data
+    page <- page + 1
+  }
+  # Convert the list of records to a tibble
+  lapply(all_data, function(record) {
+    tibble(
+      country = record$country$value,
+      countryiso3code = record$countryiso3code,
+      date = record$date,
+      value = record$value
+    )
+  }) %>% bind_rows()
+}
+
+# Define URLs for World Bank indicators
+indicator_urls <- list(
+  population = "https://api.worldbank.org/v2/country/all/indicator/SP.POP.TOTL?format=json",
+  gdp = "https://api.worldbank.org/v2/country/all/indicator/NY.GDP.MKTP.CD?format=json",
+  unemployment = "https://api.worldbank.org/v2/country/all/indicator/SL.UEM.TOTL.ZS?format=json",
+  inflation = "https://api.worldbank.org/v2/country/all/indicator/FP.CPI.TOTL.ZG?format=json",
+  exports = "https://api.worldbank.org/v2/country/all/indicator/NE.EXP.GNFS.CD?format=json",
+  gdp_per_capita = "https://api.worldbank.org/v2/country/all/indicator/NY.GDP.PCAP.CD?format=json",
+  life_expectancy = "https://api.worldbank.org/v2/country/all/indicator/SP.DYN.LE00.IN?format=json",
+  pm25 = "https://api.worldbank.org/v2/country/all/indicator/EN.ATM.PM25.MC.M3?format=json",
+  education_expenditure = "https://api.worldbank.org/v2/country/all/indicator/SE.XPD.TOTL.GD.ZS?format=json",
+  undernourishment = "https://api.worldbank.org/v2/country/all/indicator/SN.ITK.DEFC.ZS?format=json",
+  health_expenditure = "https://api.worldbank.org/v2/country/all/indicator/SH.XPD.CHEX.PC.CD?format=json",
+  infant_mortality = "https://api.worldbank.org/v2/country/all/indicator/SP.DYN.IMRT.IN?format=json"
+)
+
+# Parallel fetching of data
+num_cores <- 4 # Use one less than the number of available cores
+cl <- makeCluster(num_cores)  # Create a cluster
+
+# Export required objects and functions to the cluster
+clusterExport(cl, varlist = c("fetch_paginated_data", "indicator_urls"))
+# Load required libraries on each cluster worker
+clusterEvalQ(cl, library(httr))
+clusterEvalQ(cl, library(dplyr))
+
+# Fetch data in parallel
+indicator_data <- parLapply(cl, indicator_urls, fetch_paginated_data)
+
+# Stop the cluster
+stopCluster(cl)
+
+# Rename and store each dataset
+population_data <- indicator_data$population %>% rename(population = value)
+gdp_data <- indicator_data$gdp %>% rename(gdp = value)
+unemployment_data <- indicator_data$unemployment %>% rename(unemployment_rate = value)
+inflation_data <- indicator_data$inflation %>% rename(inflation_rate = value)
+exports_data <- indicator_data$exports %>% rename(exports = value)
+gdp_per_capita_data <- indicator_data$gdp_per_capita %>% rename(gdp_per_capita = value)
+life_expectancy_data <- indicator_data$life_expectancy %>% rename(life_expectancy = value)
+pm25_data <- indicator_data$pm25 %>% rename(pm25_air_pollution = value)
+education_expenditure_data <- indicator_data$education_expenditure %>% rename(education_expenditure = value)
+undernourishment_data <- indicator_data$undernourishment %>% rename(undernourishment_rate = value)
+health_expenditure_data <- indicator_data$health_expenditure %>% rename(health_expenditure = value)
+infant_mortality_data <- indicator_data$infant_mortality %>% rename(infant_mortality_rate = value)
+
+# Merge all datasets
+merged_data <- population_data %>%
+  left_join(gdp_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(unemployment_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(inflation_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(exports_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(gdp_per_capita_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(life_expectancy_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(pm25_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(education_expenditure_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(undernourishment_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(health_expenditure_data, by = c("country", "countryiso3code", "date")) %>%
+  left_join(infant_mortality_data, by = c("country", "countryiso3code", "date")) 
+
+# Save the merged data
+write_csv(merged_data, "data/merged_data.csv")
+
+# Filter data for years from 2015 to 2022
+filtered_data <- merged_data %>%
+  filter(as.numeric(date) >= 2015 & as.numeric(date) <= 2022)
+
+# Pivot data for analysis
+expanded_data <- filtered_data %>%
+  pivot_wider(
+    names_from = date,
+    values_from = c(population, gdp, unemployment_rate, inflation_rate, exports, gdp_per_capita,
+                    life_expectancy, pm25_air_pollution, education_expenditure, undernourishment_rate,
+                    health_expenditure, infant_mortality_rate),
+    names_glue = "{.value}_{date}"
+  )
+
+# Save the expanded data
+write_csv(expanded_data, "data/expanded_filtered_merged_data.csv")
+head(expanded_data)
+```
+
+```{r}
+# Check for NA values in each column
+na_summary <- expanded_data %>%
+  summarise(across(everything(), ~ sum(is.na(.)), .names = "NA_count_{.col}"))
+
+# Print the NA summary
+print(na_summary)
+
+# Optionally, save the NA summary to a CSV file for reference
+write_csv(na_summary, "data/na_summary.csv")
+```
+

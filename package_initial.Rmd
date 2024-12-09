@@ -1,0 +1,128 @@
+
+# Function 1: Data Preparation
+```{r}
+prepare_data <- function(data, target_year, filter_vars = NULL) {
+  # Exclude life_expectancy variables from other years
+  data <- data %>%
+    select(-starts_with("life_expectancy_"), all_of(target), all_of(filter_vars)) %>%
+    select(where(is.numeric)) # Keep only numeric variables
+
+  # Split into predictors and target
+  X <- data %>% select(-all_of(target))
+  Y <- data[[target]]
+  
+  return(list(X = X, Y = Y))
+}
+```
+
+# Function 2: Train-Test Split
+```{r}
+split_data <- function(X, Y, split_ratio = 0.8) {
+  set.seed(123)  # For reproducibility
+  train_index <- caret::createDataPartition(Y, p = split_ratio, list = FALSE)
+
+  # Split into training and testing sets
+  train_data <- list(X = X[train_index, ], Y = Y[train_index])
+  test_data <- list(X = X[-train_index, ], Y = Y[-train_index])
+  
+  return(list(train = train_data, test = test_data))
+}
+```
+
+# Function 3: Perform PCA
+```{r}
+perform_pca <- function(X_train, X_test, variance_threshold = 0.95) {
+  # Perform PCA on training data
+  pca_model <- caret::preProcess(X_train, method = "pca", thresh = variance_threshold)
+  X_train_pca <- predict(pca_model, X_train)
+  X_test_pca <- predict(pca_model, X_test)
+  
+  return(list(pca_model = pca_model, X_train_pca = X_train_pca, X_test_pca = X_test_pca))
+}
+```
+
+# Function 4: Train Models
+```{r}
+train_models <- function(X_train_pca, Y_train) {
+  train_data <- cbind(X_train_pca, life_expectancy = Y_train)
+  control <- caret::trainControl(method = "cv", number = 5)  # 5-fold cross-validation
+
+  models <- list(
+    lm = caret::train(life_expectancy ~ ., data = train_data, method = "lm", trControl = control),
+    rf = caret::train(life_expectancy ~ ., data = train_data, method = "rf", trControl = control),
+    svm = caret::train(life_expectancy ~ ., data = train_data, method = "svmRadial", trControl = control),
+    gbm = caret::train(life_expectancy ~ ., data = train_data, method = "gbm", trControl = control, verbose = FALSE)
+  )
+  
+  return(models)
+}
+```
+
+# Function 5: Evaluate Models
+```{r}
+evaluate_models <- function(models, X_test_pca, Y_test) {
+  evaluate_model <- function(model, X_test, Y_test) {
+    predictions <- predict(model, newdata = X_test)
+    rmse_val <- Metrics::rmse(Y_test, predictions)
+    r2_val <- cor(Y_test, predictions)^2
+    return(list(predictions = predictions, rmse = rmse_val, r2 = r2_val))
+  }
+
+  evaluations <- lapply(models, evaluate_model, X_test = X_test_pca, Y_test = Y_test)
+  results <- data.frame(
+    Model = names(models),
+    RMSE = sapply(evaluations, `[[`, "rmse"),
+    R2 = sapply(evaluations, `[[`, "r2")
+  )
+  
+  return(results)
+}
+```
+
+# Function 6: Plot Results
+```{r}
+plot_results <- function(Y_test, predictions, output_file) {
+  test_results <- data.frame(Actual = Y_test, predictions)
+
+  plot <- ggplot(test_results, aes(x = Actual)) +
+    geom_point(aes(y = predictions, color = "Predictions")) +
+    theme_minimal() +
+    labs(
+      title = "Predictions vs Actual Life Expectancy",
+      x = "Actual Life Expectancy",
+      y = "Predicted Life Expectancy",
+      color = "Legend"
+    )
+
+  ggsave(output_file, plot = plot, width = 10, height = 6)
+  return(plot)
+}
+```
+
+# Example Workflow Using Functions
+```{r}
+# Load the data
+imputed_data <- read_csv("data/imputed_data.csv")
+
+# Prepare data
+prepared <- prepare_data(imputed_data, target_year = 2022, filter_vars = c("population_2022", "gdp_2022"))
+
+# Split data
+split <- split_data(prepared$X, prepared$Y)
+
+# Perform PCA
+pca_results <- perform_pca(split$train$X, split$test$X)
+
+# Train models
+models <- train_models(pca_results$X_train_pca, split$train$Y)
+
+# Evaluate models
+evaluation <- evaluate_models(models, pca_results$X_test_pca, split$test$Y)
+print(evaluation)
+
+# Plot results
+predictions_rf <- predict(models$rf, newdata = pca_results$X_test_pca)
+plot_results(split$test$Y, predictions_rf, "plot/predictions_rf.png")
+```
+
+
